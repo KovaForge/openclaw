@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as https from "node:https";
 import * as carbonGateway from "@buape/carbon/gateway";
 import type { APIGatewayBotInfo } from "discord-api-types/v10";
 import * as httpsProxyAgent from "https-proxy-agent";
@@ -381,10 +382,17 @@ export function createDiscordGatewayPlugin(params: {
   };
 
   if (!proxy) {
+    const wsAgent = new https.Agent({ family: 4 });
+    const fetchAgent = new undici.Agent({
+      connect: { family: 4 },
+    });
     return createGatewayPlugin({
       options,
       fetchImpl: async (input, init) => {
-        const response = await fetch(input, init as RequestInit);
+        const response = (await (params.__testing?.undiciFetch ?? undici.fetch)(input, {
+          ...(init as RequestInit),
+          dispatcher: fetchAgent,
+        })) as unknown as Response;
         if (!debugProxySettings.enabled) {
           captureHttpExchange({
             url: input,
@@ -398,6 +406,7 @@ export function createDiscordGatewayPlugin(params: {
         }
         return response;
       },
+      wsAgent,
       runtime: params.runtime,
       testing: params.__testing
         ? {

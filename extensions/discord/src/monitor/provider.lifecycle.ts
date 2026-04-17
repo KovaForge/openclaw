@@ -13,7 +13,7 @@ import {
 } from "./gateway-supervisor.js";
 import type { DiscordMonitorStatusSink } from "./status.js";
 
-const DISCORD_GATEWAY_READY_TIMEOUT_MS = 15_000;
+const DISCORD_GATEWAY_READY_TIMEOUT_MS = 90_000;
 const DISCORD_GATEWAY_RUNTIME_READY_TIMEOUT_MS = 30_000;
 const DISCORD_GATEWAY_READY_POLL_MS = 250;
 const DISCORD_GATEWAY_STARTUP_DISCONNECT_DRAIN_TIMEOUT_MS = 5_000;

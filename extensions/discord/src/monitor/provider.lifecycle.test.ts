@@ -229,11 +229,11 @@ describe("runDiscordGatewayLifecycle", () => {
       const { lifecycleParams, runtimeError, statusSink } = createLifecycleHarness({ gateway });
       const lifecyclePromise = runDiscordGatewayLifecycle(lifecycleParams);
 
-      await vi.advanceTimersByTimeAsync(16_500);
+      await vi.advanceTimersByTimeAsync(91_500);
       await expect(lifecyclePromise).resolves.toBeUndefined();
 
       expect(runtimeError).toHaveBeenCalledWith(
-        expect.stringContaining("gateway was not ready after 15000ms; restarting gateway"),
+        expect.stringContaining("gateway was not ready after 90000ms; restarting gateway"),
       );
       expect(gateway.disconnect).toHaveBeenCalledTimes(1);
       expect(gateway.connect).toHaveBeenCalledTimes(1);
