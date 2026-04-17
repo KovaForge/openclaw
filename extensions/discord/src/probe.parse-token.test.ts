@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseApplicationIdFromToken } from "./probe.js";
+import { fetchDiscordApplicationId, parseApplicationIdFromToken } from "./probe.js";
 
 describe("parseApplicationIdFromToken", () => {
   it("extracts application ID from a valid token", () => {
@@ -39,5 +39,31 @@ describe("parseApplicationIdFromToken", () => {
 
   it("returns undefined when first segment is empty (starts with dot)", () => {
     expect(parseApplicationIdFromToken(".ts.hmac")).toBeUndefined();
+  });
+});
+
+describe("fetchDiscordApplicationId", () => {
+  const token = `${Buffer.from("1477179610322964541").toString("base64")}.ts.hmac`;
+
+  it("falls back to the token application id on transient non-ok responses", async () => {
+    const fetcher: typeof fetch = async () =>
+      new Response(JSON.stringify({ message: "rate limited" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      });
+
+    await expect(fetchDiscordApplicationId(token, 1000, fetcher)).resolves.toBe(
+      "1477179610322964541",
+    );
+  });
+
+  it("does not mask credential failures", async () => {
+    const fetcher: typeof fetch = async () =>
+      new Response(JSON.stringify({ message: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+
+    await expect(fetchDiscordApplicationId(token, 1000, fetcher)).resolves.toBeUndefined();
   });
 });

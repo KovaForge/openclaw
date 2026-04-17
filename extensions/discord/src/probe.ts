@@ -6,12 +6,12 @@ import { normalizeDiscordToken } from "./token.js";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
-export type DiscordProbe = BaseProbeResult & {
+export interface DiscordProbe extends BaseProbeResult {
   status?: number | null;
   elapsedMs: number;
   bot?: { id?: string | null; username?: string | null };
   application?: DiscordApplicationSummary;
-};
+}
 
 export type DiscordPrivilegedIntentStatus = "enabled" | "limited" | "disabled";
 
@@ -222,9 +222,12 @@ export async function fetchDiscordApplicationId(
         return json.id;
       }
     }
-    // Non-ok HTTP response (401, 403, etc.) — fail fast so credential
-    // errors surface immediately rather than being masked by the fallback.
-    return undefined;
+    // Preserve fast failure for credential issues, but keep startup resilient
+    // when Discord returns a transient non-ok response during reconnect storms.
+    if (res.status === 401 || res.status === 403) {
+      return undefined;
+    }
+    return parseApplicationIdFromToken(token);
   } catch {
     // Transport / timeout error — fall back to extracting the application
     // ID directly from the token to keep the bot starting.
