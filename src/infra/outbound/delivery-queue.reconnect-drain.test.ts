@@ -10,6 +10,7 @@ import {
   MAX_RETRIES,
   type RecoveryLogger,
   recoverPendingDeliveries,
+  withActiveDeliveryClaim,
 } from "./delivery-queue.js";
 import {
   createRecoveryLog,
@@ -44,6 +45,19 @@ async function drainDirectChatReconnectPending(opts: {
       bypassBackoff:
         typeof entry.lastError === "string" && entry.lastError.includes(NO_LISTENER_ERROR),
     }),
+  });
+}
+
+async function drainAcct1DirectChatReconnect(params: {
+  deliver: DeliverFn;
+  log: RecoveryLogger;
+  stateDir: string;
+}) {
+  await drainDirectChatReconnectPending({
+    accountId: "acct1",
+    deliver: params.deliver,
+    log: params.log,
+    stateDir: params.stateDir,
   });
 }
 
@@ -83,18 +97,9 @@ describe("drainPendingDeliveries for reconnect", () => {
     const log = createRecoveryLog();
     const deliver = vi.fn<DeliverFn>(async () => {});
 
-    const id = await enqueueDelivery(
-      { channel: "directchat", to: "+1555", payloads: [{ text: "hi" }], accountId: "acct1" },
-      tmpDir,
-    );
-    await failDelivery(id, NO_LISTENER_ERROR, tmpDir);
+    await enqueueFailedDirectChatDelivery({ accountId: "acct1", stateDir: tmpDir });
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(
@@ -106,18 +111,9 @@ describe("drainPendingDeliveries for reconnect", () => {
     const log = createRecoveryLog();
     const deliver = vi.fn<DeliverFn>(async () => {});
 
-    const id = await enqueueDelivery(
-      { channel: "directchat", to: "+1555", payloads: [{ text: "hi" }], accountId: "other" },
-      tmpDir,
-    );
-    await failDelivery(id, NO_LISTENER_ERROR, tmpDir);
+    await enqueueFailedDirectChatDelivery({ accountId: "other", stateDir: tmpDir });
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     // deliver should not be called since no eligible entries for acct1
     expect(deliver).not.toHaveBeenCalled();
@@ -136,12 +132,7 @@ describe("drainPendingDeliveries for reconnect", () => {
       lastError?: string;
     };
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
 
@@ -164,12 +155,7 @@ describe("drainPendingDeliveries for reconnect", () => {
 
     // Should not throw
     await expect(
-      drainDirectChatReconnectPending({
-        accountId: "acct1",
-        deliver,
-        log,
-        stateDir: tmpDir,
-      }),
+      drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir }),
     ).resolves.toBeUndefined();
   });
 
@@ -187,12 +173,7 @@ describe("drainPendingDeliveries for reconnect", () => {
       await failDelivery(id, NO_LISTENER_ERROR, tmpDir);
     }
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     // Should have moved to failed, not delivered
     expect(deliver).not.toHaveBeenCalled();
@@ -283,12 +264,7 @@ describe("drainPendingDeliveries for reconnect", () => {
       expect(deliver).toHaveBeenCalledTimes(1);
     });
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(log.info).toHaveBeenCalledWith(
@@ -349,12 +325,7 @@ describe("drainPendingDeliveries for reconnect", () => {
       );
     });
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     releaseBlocker!();
     await startupRecovery;
@@ -374,12 +345,7 @@ describe("drainPendingDeliveries for reconnect", () => {
       tmpDir,
     );
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(
@@ -403,12 +369,7 @@ describe("drainPendingDeliveries for reconnect", () => {
     entry.lastAttemptAt = Date.now() - 30_000;
     fs.writeFileSync(entryPath, JSON.stringify(entry, null, 2));
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
   });
@@ -423,12 +384,7 @@ describe("drainPendingDeliveries for reconnect", () => {
     );
     await failDelivery(id, "network down", tmpDir);
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).not.toHaveBeenCalled();
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining("not ready for retry yet"));
@@ -438,18 +394,9 @@ describe("drainPendingDeliveries for reconnect", () => {
     const log = createRecoveryLog();
     const deliver = vi.fn<DeliverFn>(async () => {});
 
-    const id = await enqueueDelivery(
-      { channel: "directchat", to: "+1555", payloads: [{ text: "hi" }], accountId: "acct1" },
-      tmpDir,
-    );
-    await failDelivery(id, NO_LISTENER_ERROR, tmpDir);
+    await enqueueFailedDirectChatDelivery({ accountId: "acct1", stateDir: tmpDir });
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
-      log,
-      stateDir: tmpDir,
-    });
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
 
     expect(deliver).toHaveBeenCalledTimes(1);
   });
@@ -463,13 +410,74 @@ describe("drainPendingDeliveries for reconnect", () => {
       tmpDir,
     );
 
-    await drainDirectChatReconnectPending({
-      accountId: "acct1",
-      deliver,
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
+
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("recomputes backoff bypass after rereading the claimed entry", async () => {
+    const log = createRecoveryLog();
+    const deliver = vi.fn<DeliverFn>(async () => {});
+    const id = await enqueueFailedDirectChatDelivery({ accountId: "acct1", stateDir: tmpDir });
+    const entryPath = path.join(tmpDir, "delivery-queue", `${id}.json`);
+    let mutated = false;
+
+    await drainPendingDeliveries({
+      drainKey: "directchat:acct1",
+      logLabel: "DirectChat reconnect drain",
+      cfg: stubCfg,
       log,
       stateDir: tmpDir,
+      deliver,
+      selectEntry: (entry) => {
+        if (entry.id === id && !mutated) {
+          mutated = true;
+          const nextEntry = JSON.parse(fs.readFileSync(entryPath, "utf-8")) as {
+            lastError?: string;
+          };
+          nextEntry.lastError = "network down";
+          fs.writeFileSync(entryPath, JSON.stringify(nextEntry, null, 2));
+        }
+        return {
+          match:
+            entry.channel === "directchat" &&
+            normalizeReconnectAccountIdForTest(entry.accountId) === "acct1",
+          bypassBackoff:
+            typeof entry.lastError === "string" && entry.lastError.includes(NO_LISTENER_ERROR),
+        };
+      },
     });
 
     expect(deliver).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining("not ready for retry yet"));
+  });
+
+  it("skips entries that an in-flight live delivery has actively claimed", async () => {
+    // Regression for openclaw/openclaw#70386: a reconnect drain that runs
+    // while the live send is still writing to the adapter must not re-drive
+    // the same entry. The live delivery path holds an in-memory active claim
+    // for `queueId` across its send; drain honors that claim via the same
+    // `entriesInProgress` set used for startup recovery.
+    const log = createRecoveryLog();
+    const deliver = vi.fn<DeliverFn>(async () => {});
+
+    const id = await enqueueDelivery(
+      { channel: "directchat", to: "+1555", payloads: [{ text: "hi" }], accountId: "acct1" },
+      tmpDir,
+    );
+
+    const claimResult = await withActiveDeliveryClaim(id, async () => {
+      await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
+      expect(deliver).not.toHaveBeenCalled();
+      expect(log.info).toHaveBeenCalledWith(
+        expect.stringContaining(`entry ${id} is already being recovered`),
+      );
+    });
+    expect(claimResult.status).toBe("claimed");
+
+    // Once the live delivery path releases its claim (success or failure), a
+    // later reconnect drain is free to pick the entry up again.
+    await drainAcct1DirectChatReconnect({ deliver, log, stateDir: tmpDir });
+    expect(deliver).toHaveBeenCalledTimes(1);
   });
 });
