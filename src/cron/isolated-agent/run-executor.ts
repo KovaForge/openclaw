@@ -1,3 +1,4 @@
+import { isLikelyContextOverflowError } from "../../agents/pi-embedded-helpers/errors.js";
 import type { SkillSnapshot } from "../../agents/skills.js";
 import type { ThinkLevel, VerboseLevel } from "../../auto-reply/thinking.js";
 import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
@@ -105,6 +106,9 @@ export function createCronPromptExecutor(params: {
   let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
     params.cronSession.sessionEntry.systemPromptReport,
   );
+  let forceLightweightBootstrap = false;
+  const shouldUseLightweightBootstrap = () =>
+    forceLightweightBootstrap || params.agentPayload?.lightContext === true;
 
   const runPrompt = async (promptText: string) => {
     const fallbackResult = await runWithModelFallback({
@@ -143,6 +147,8 @@ export function createCronPromptExecutor(params: {
             messageChannel: params.messageChannel,
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
+            bootstrapContextMode: shouldUseLightweightBootstrap() ? "lightweight" : undefined,
+            bootstrapContextRunKind: "cron",
             senderIsOwner: true,
           });
           bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -193,7 +199,7 @@ export function createCronPromptExecutor(params: {
           }).enabled,
           verboseLevel: params.resolvedVerboseLevel,
           timeoutMs: params.timeoutMs,
-          bootstrapContextMode: params.agentPayload?.lightContext ? "lightweight" : undefined,
+          bootstrapContextMode: shouldUseLightweightBootstrap() ? "lightweight" : undefined,
           bootstrapContextRunKind: "cron",
           toolsAllow: params.agentPayload?.toolsAllow,
           runId: params.cronSession.sessionEntry.sessionId,
@@ -221,6 +227,10 @@ export function createCronPromptExecutor(params: {
 
   return {
     runPrompt,
+    enableLightweightBootstrapRetry: () => {
+      forceLightweightBootstrap = true;
+    },
+    isLightweightBootstrapEnabled: () => shouldUseLightweightBootstrap(),
     getState: () => ({
       runResult,
       fallbackProvider,
@@ -304,6 +314,14 @@ export async function executeCronRun(params: {
       await executor.runPrompt(params.commandBody);
       break;
     } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      if (!executor.isLightweightBootstrapEnabled() && isLikelyContextOverflowError(errorText)) {
+        executor.enableLightweightBootstrapRetry();
+        logWarn(
+          `[cron:${params.job.id}] Context overflow while preparing full cron bootstrap; retrying once with lightweight bootstrap context.`,
+        );
+        continue;
+      }
       if (!(err instanceof LiveSessionModelSwitchError)) {
         throw err;
       }

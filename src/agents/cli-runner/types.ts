@@ -35,6 +35,8 @@ export type RunCliAgentParams = {
   authProfileId?: string;
   bootstrapPromptWarningSignaturesSeen?: string[];
   bootstrapPromptWarningSignature?: string;
+  bootstrapContextMode?: "full" | "lightweight";
+  bootstrapContextRunKind?: "default" | "cron" | "heartbeat";
   images?: ImageContent[];
   imageOrder?: PromptImageOrderEntry[];
   skillsSnapshot?: SkillSnapshot;

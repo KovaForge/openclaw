@@ -173,6 +173,43 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
     ).toBe(false);
   });
 
+  it("passes lightweight cron bootstrap context into CLI preparation", async () => {
+    const { dir, sessionFile } = createSessionFile();
+    const resolveBootstrapContextForRun = vi.fn(async () => ({
+      bootstrapFiles: [],
+      contextFiles: [],
+    }));
+    setCliRunnerPrepareTestDeps({
+      makeBootstrapWarn: vi.fn(() => () => undefined),
+      resolveBootstrapContextForRun,
+      resolveOpenClawDocsPath: vi.fn(async () => null),
+    });
+
+    await prepareCliRunContext({
+      sessionId: "session-test",
+      sessionKey: "agent:main:test",
+      agentId: "main",
+      trigger: "cron",
+      sessionFile,
+      workspaceDir: dir,
+      prompt: "run cron job",
+      provider: "test-cli",
+      model: "test-model",
+      timeoutMs: 1_000,
+      runId: "run-test",
+      config: createCliBackendConfig(),
+      bootstrapContextMode: "lightweight",
+      bootstrapContextRunKind: "cron",
+    });
+
+    expect(resolveBootstrapContextForRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextMode: "lightweight",
+        runKind: "cron",
+      }),
+    );
+  });
+
   it("applies prompt-build hook context to Claude-style CLI preparation", async () => {
     const { dir, sessionFile } = createSessionFile();
     try {
