@@ -1,16 +1,15 @@
 import crypto from "node:crypto";
-import { normalizeOptionalString, readStringValue } from "openclaw/plugin-sdk/text-runtime";
 import {
   executeActAction,
   executeConsoleAction,
   executeSnapshotAction,
   executeTabsAction,
 } from "./browser-tool.actions.js";
-import { BrowserToolSchema } from "./browser-tool.schema.js";
 import {
   type AnyAgentTool,
   type NodeListNode,
   DEFAULT_UPLOAD_DIR,
+  BrowserToolSchema,
   applyBrowserProxyPaths,
   browserAct,
   browserArmDialog,
@@ -25,13 +24,16 @@ import {
   browserStart,
   browserStatus,
   browserStop,
+  callGatewayTool,
   getBrowserProfileCapabilities,
   imageResultFromFile,
   jsonResult,
   listNodes,
   loadConfig,
+  normalizeOptionalString,
   persistBrowserProxyFiles,
   readStringParam,
+  readStringValue,
   resolveBrowserConfig,
   resolveExistingPathsWithinRoot,
   resolveNodeIdFromList,
@@ -39,8 +41,7 @@ import {
   selectDefaultNodeFromList,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
-} from "./core-api.js";
-import { callGatewayTool } from "./core-api.js";
+} from "./browser-tool.runtime.js";
 
 const browserToolDeps = {
   browserAct,
@@ -380,9 +381,11 @@ export function createBrowserTool(opts?: {
     description: [
       "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions).",
       "Browser choice: omit profile by default for the isolated OpenClaw-managed browser (`openclaw`).",
-      'For the logged-in user browser on the local host, use profile="user". A supported Chromium-based browser (v144+) must be running. Use only when existing logins/cookies matter and the user is present.',
+      'For the logged-in user browser, use profile="user". A supported Chromium-based browser (v144+) must be running on the selected host or browser node. Use only when existing logins/cookies matter and the user is present.',
+      'For profile="user" or other existing-session profiles, omit timeoutMs on act:type, evaluate, hover, scrollIntoView, drag, select, and fill; that driver rejects per-call timeout overrides for those actions.',
       'When a node-hosted browser proxy is available, the tool may auto-route to it. Pin a node with node=<id|name> or target="node".',
-      "When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc).",
+      "When using refs from snapshot (e.g. e12), keep the same tab: prefer passing targetId from the snapshot response into subsequent actions (act/click/type/etc). For tab operations, targetId also accepts tabId handles (t1) and labels from action=tabs.",
+      "For multi-step browser work, login checks, stale refs, duplicate tabs, or Google Meet flows, use the bundled browser-automation skill when it is available.",
       'For stable, self-resolving refs across calls, use snapshot with refs="aria" (Playwright aria-ref ids). Default refs="role" are role+name-based.',
       "Use snapshot+act for UI automation. Avoid act:wait by default; use only in exceptional cases when no reliable UI state exists.",
       `target selects browser location (sandbox|host|node). Default: ${targetDefault}.`,
@@ -395,31 +398,39 @@ export function createBrowserTool(opts?: {
       const profile = readStringParam(params, "profile");
       const requestedNode = readStringParam(params, "node");
       let target = readStringParam(params, "target") as "sandbox" | "host" | "node" | undefined;
+      const configuredNode = browserToolDeps.loadConfig().gateway?.nodes?.browser?.node?.trim();
 
       if (requestedNode && target && target !== "node") {
         throw new Error('node is only supported with target="node".');
       }
-      // User-browser profiles (existing-session) are host-only.
+      // existing-session profiles can attach through the selected host or browser node,
+      // but they must never fall back into the sandbox browser.
       const isUserBrowserProfile = shouldPreferHostForProfile(profile);
       if (isUserBrowserProfile) {
-        if (requestedNode || target === "node") {
-          throw new Error(`profile="${profile}" only supports the local host browser.`);
-        }
         if (target === "sandbox") {
           throw new Error(
             `profile="${profile}" cannot use the sandbox browser; use target="host" or omit target.`,
           );
         }
-        if (!target && !requestedNode) {
-          target = "host";
-        }
       }
 
-      const nodeTarget = await resolveBrowserNodeTarget({
-        requestedNode: requestedNode ?? undefined,
-        target,
-        sandboxBridgeUrl: opts?.sandboxBridgeUrl,
-      });
+      let nodeTarget: BrowserNodeTarget | null = null;
+      try {
+        nodeTarget = await resolveBrowserNodeTarget({
+          requestedNode: requestedNode ?? undefined,
+          target,
+          sandboxBridgeUrl: opts?.sandboxBridgeUrl,
+        });
+      } catch (error) {
+        // Keep the logged-in user browser usable on the host when auto-discovery
+        // of browser nodes fails transiently. Explicit node requests still fail.
+        if (!(isUserBrowserProfile && !target && !requestedNode && !configuredNode)) {
+          throw error;
+        }
+      }
+      if (isUserBrowserProfile && !target && !requestedNode && !nodeTarget) {
+        target = "host";
+      }
 
       const resolvedTarget = target === "node" ? undefined : target;
       const baseUrl = nodeTarget
@@ -513,16 +524,20 @@ export function createBrowserTool(opts?: {
           return await executeTabsAction({ baseUrl, profile, proxyRequest });
         case "open": {
           const targetUrl = readTargetUrlParam(params);
+          const label = normalizeOptionalString(params.label);
           if (proxyRequest) {
             const result = await proxyRequest({
               method: "POST",
               path: "/tabs/open",
               profile,
-              body: { url: targetUrl },
+              body: { url: targetUrl, ...(label ? { label } : {}) },
             });
             return jsonResult(result);
           }
-          const opened = await browserToolDeps.browserOpenTab(baseUrl, targetUrl, { profile });
+          const opened = await browserToolDeps.browserOpenTab(baseUrl, targetUrl, {
+            profile,
+            label,
+          });
           browserToolDeps.trackSessionBrowserTab({
             sessionKey: opts?.agentSessionKey,
             targetId: opened.targetId,

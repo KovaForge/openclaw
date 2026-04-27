@@ -20,7 +20,7 @@ import {
   normalizeCdpHttpBaseForJsonEndpoints,
   withCdpSocket,
 } from "./cdp.helpers.js";
-import { normalizeCdpWsUrl } from "./cdp.js";
+import { AX_REF_PATTERN, normalizeCdpWsUrl } from "./cdp.js";
 import { getChromeWebSocketUrl } from "./chrome.js";
 import { BrowserTabNotFoundError } from "./errors.js";
 import {
@@ -55,13 +55,6 @@ export type BrowserNetworkRequest = {
   status?: number;
   ok?: boolean;
   failureText?: string;
-};
-
-type SnapshotForAIResult = { full: string; incremental?: string };
-type SnapshotForAIOptions = { timeout?: number; track?: string };
-
-export type WithSnapshotForAI = {
-  _snapshotForAI?: (options?: SnapshotForAIOptions) => Promise<SnapshotForAIResult>;
 };
 
 type TargetInfoResponse = {
@@ -882,6 +875,13 @@ export function refLocator(page: Page, ref: string) {
       ? locAny.getByRole(info.role as never, { name: info.name, exact: true })
       : locAny.getByRole(info.role as never);
     return info.nth !== undefined ? locator.nth(info.nth) : locator;
+  }
+
+  if (AX_REF_PATTERN.test(normalized)) {
+    throw new Error(
+      `Ref "${normalized}" comes from a format=aria snapshot and cannot be used with act. ` +
+        `Re-snapshot with format=ai and use the eN refs from that snapshot.`,
+    );
   }
 
   return page.locator(`aria-ref=${normalized}`);

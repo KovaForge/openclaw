@@ -1,3 +1,4 @@
+import { buildProfileQuery, withBaseUrl } from "./client-actions-url.js";
 import { fetchBrowserJson } from "./client-fetch.js";
 import type { BrowserTab, BrowserTransport, SnapshotAriaNode } from "./client.types.js";
 
@@ -76,18 +77,6 @@ export type SnapshotResult =
       imagePath?: string;
       imageType?: "png" | "jpeg";
     };
-
-function buildProfileQuery(profile?: string): string {
-  return profile ? `?profile=${encodeURIComponent(profile)}` : "";
-}
-
-function withBaseUrl(baseUrl: string | undefined, path: string): string {
-  const trimmed = baseUrl?.trim();
-  if (!trimmed) {
-    return path;
-  }
-  return `${trimmed.replace(/\/$/, "")}${path}`;
-}
 
 export async function browserStatus(
   baseUrl?: string,
@@ -211,13 +200,13 @@ export async function browserTabs(
 export async function browserOpenTab(
   baseUrl: string | undefined,
   url: string,
-  opts?: { profile?: string },
+  opts?: { profile?: string; label?: string },
 ): Promise<BrowserTab> {
   const q = buildProfileQuery(opts?.profile);
   return await fetchBrowserJson<BrowserTab>(withBaseUrl(baseUrl, `/tabs/open${q}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, ...(opts?.label ? { label: opts.label } : {}) }),
     timeoutMs: 15000,
   });
 }

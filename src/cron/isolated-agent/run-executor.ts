@@ -1,8 +1,13 @@
+import { isLikelyContextOverflowError } from "../../agents/pi-embedded-helpers/errors.js";
 import type { SkillSnapshot } from "../../agents/skills.js";
 import type { ThinkLevel, VerboseLevel } from "../../auto-reply/thinking.js";
 import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { CronJob } from "../types.js";
+import {
+  resolveCronChannelOutputPolicy,
+  resolveCurrentChannelTarget,
+} from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
 import {
   getCliSessionId,
@@ -65,10 +70,15 @@ export function createCronPromptExecutor(params: {
   thinkLevel: ThinkLevel | undefined;
   timeoutMs: number;
   messageChannel: string | undefined;
-  resolvedDelivery: { accountId?: string };
+  resolvedDelivery: {
+    accountId?: string;
+    to?: string;
+    threadId?: string | number;
+  };
   toolPolicy: {
     requireExplicitMessageTarget: boolean;
     disableMessageTool: boolean;
+    forceMessageTool: boolean;
   };
   skillsSnapshot: SkillSnapshot;
   agentPayload: AgentTurnPayload;
@@ -96,6 +106,9 @@ export function createCronPromptExecutor(params: {
   let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
     params.cronSession.sessionEntry.systemPromptReport,
   );
+  let forceLightweightBootstrap = false;
+  const shouldUseLightweightBootstrap = () =>
+    forceLightweightBootstrap || params.agentPayload?.lightContext === true;
 
   const runPrompt = async (promptText: string) => {
     const fallbackResult = await runWithModelFallback({
@@ -119,6 +132,7 @@ export function createCronPromptExecutor(params: {
             sessionId: params.cronSession.sessionEntry.sessionId,
             sessionKey: params.agentSessionKey,
             agentId: params.agentId,
+            trigger: "cron",
             sessionFile,
             workspaceDir: params.workspaceDir,
             config: params.cfgWithAgentDefaults,
@@ -130,8 +144,11 @@ export function createCronPromptExecutor(params: {
             runId: params.cronSession.sessionEntry.sessionId,
             cliSessionId,
             skillsSnapshot: params.skillsSnapshot,
+            messageChannel: params.messageChannel,
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
+            bootstrapContextMode: shouldUseLightweightBootstrap() ? "lightweight" : undefined,
+            bootstrapContextRunKind: "cron",
             senderIsOwner: true,
           });
           bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -141,15 +158,24 @@ export function createCronPromptExecutor(params: {
         }
         const { resolveFastModeState, resolveNestedAgentLane, runEmbeddedPiAgent } =
           await loadCronEmbeddedRuntime();
+        const currentChannelId = await resolveCurrentChannelTarget({
+          channel: params.messageChannel,
+          to: params.resolvedDelivery.to,
+          threadId: params.resolvedDelivery.threadId,
+        });
         const result = await runEmbeddedPiAgent({
           sessionId: params.cronSession.sessionEntry.sessionId,
           sessionKey: params.agentSessionKey,
           agentId: params.agentId,
           trigger: "cron",
+          cleanupBundleMcpOnRunEnd: params.job.sessionTarget === "isolated",
           allowGatewaySubagentBinding: true,
           senderIsOwner: false,
           messageChannel: params.messageChannel,
           agentAccountId: params.resolvedDelivery.accountId,
+          messageTo: params.resolvedDelivery.to,
+          messageThreadId: params.resolvedDelivery.threadId,
+          currentChannelId,
           sessionFile,
           agentDir: params.agentDir,
           workspaceDir: params.workspaceDir,
@@ -173,12 +199,13 @@ export function createCronPromptExecutor(params: {
           }).enabled,
           verboseLevel: params.resolvedVerboseLevel,
           timeoutMs: params.timeoutMs,
-          bootstrapContextMode: params.agentPayload?.lightContext ? "lightweight" : undefined,
+          bootstrapContextMode: shouldUseLightweightBootstrap() ? "lightweight" : undefined,
           bootstrapContextRunKind: "cron",
           toolsAllow: params.agentPayload?.toolsAllow,
           runId: params.cronSession.sessionEntry.sessionId,
           requireExplicitMessageTarget: params.toolPolicy.requireExplicitMessageTarget,
           disableMessageTool: params.toolPolicy.disableMessageTool,
+          forceMessageTool: params.toolPolicy.forceMessageTool,
           allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
           abortSignal: params.abortSignal,
           bootstrapPromptWarningSignaturesSeen,
@@ -200,6 +227,10 @@ export function createCronPromptExecutor(params: {
 
   return {
     runPrompt,
+    enableLightweightBootstrapRetry: () => {
+      forceLightweightBootstrap = true;
+    },
+    isLightweightBootstrapEnabled: () => shouldUseLightweightBootstrap(),
     getState: () => ({
       runResult,
       fallbackProvider,
@@ -222,10 +253,13 @@ export async function executeCronRun(params: {
   resolvedDelivery: {
     channel?: string;
     accountId?: string;
+    to?: string;
+    threadId?: string | number;
   };
   toolPolicy: {
     requireExplicitMessageTarget: boolean;
     disableMessageTool: boolean;
+    forceMessageTool: boolean;
   };
   skillsSnapshot: SkillSnapshot;
   agentPayload: AgentTurnPayload;
@@ -280,6 +314,14 @@ export async function executeCronRun(params: {
       await executor.runPrompt(params.commandBody);
       break;
     } catch (err) {
+      const errorText = err instanceof Error ? err.message : String(err);
+      if (!executor.isLightweightBootstrapEnabled() && isLikelyContextOverflowError(errorText)) {
+        executor.enableLightweightBootstrapRetry();
+        logWarn(
+          `[cron:${params.job.id}] Context overflow while preparing full cron bootstrap; retrying once with lightweight bootstrap context.`,
+        );
+        continue;
+      }
       if (!(err instanceof LiveSessionModelSwitchError)) {
         throw err;
       }
@@ -325,7 +367,9 @@ export async function executeCronRun(params: {
       payloads: interimPayloads,
       runLevelError: runResult.meta?.error,
       finalAssistantVisibleText: runResult.meta?.finalAssistantVisibleText,
-      preferFinalAssistantVisibleText: params.resolvedDelivery.channel === "telegram",
+      preferFinalAssistantVisibleText: (
+        await resolveCronChannelOutputPolicy(params.resolvedDelivery.channel)
+      ).preferFinalAssistantVisibleText,
     });
     const interimText = interimOutputText?.trim() ?? "";
     const shouldRetryInterimAck =

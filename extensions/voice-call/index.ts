@@ -1,6 +1,6 @@
-import { Type } from "@sinclair/typebox";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+import { Type } from "typebox";
 import {
   definePluginEntry,
   type GatewayRequestHandlerOptions,
@@ -82,6 +82,11 @@ const voiceCallConfigSchema = {
     },
     "realtime.streamPath": { label: "Realtime Stream Path", advanced: true },
     "realtime.instructions": { label: "Realtime Instructions", advanced: true },
+    "realtime.toolPolicy": {
+      label: "Realtime Tool Policy",
+      help: "Controls the shared openclaw_agent_consult tool.",
+      advanced: true,
+    },
     "realtime.providers": { label: "Realtime Provider Config", advanced: true },
     "tts.provider": {
       label: "TTS Provider Override",
@@ -123,6 +128,11 @@ const VoiceCallToolSchema = Type.Union([
     message: Type.String({ description: "Message to speak" }),
   }),
   Type.Object({
+    action: Type.Literal("send_dtmf"),
+    callId: Type.String({ description: "Call ID" }),
+    digits: Type.String({ description: "DTMF digits to send" }),
+  }),
+  Type.Object({
     action: Type.Literal("end_call"),
     callId: Type.String({ description: "Call ID" }),
   }),
@@ -137,6 +147,12 @@ const VoiceCallToolSchema = Type.Union([
     message: Type.Optional(Type.String({ description: "Optional intro message" })),
   }),
 ]);
+
+function asParamRecord(params: unknown): Record<string, unknown> {
+  return params && typeof params === "object" && !Array.isArray(params)
+    ? (params as Record<string, unknown>)
+    : {};
+}
 
 export default definePluginEntry({
   id: "voice-call",
@@ -318,6 +334,29 @@ export default definePluginEntry({
     );
 
     api.registerGatewayMethod(
+      "voicecall.dtmf",
+      async ({ params, respond }: GatewayRequestHandlerOptions) => {
+        try {
+          const callId = normalizeOptionalString(params?.callId) ?? "";
+          const digits = normalizeOptionalString(params?.digits) ?? "";
+          if (!callId || !digits) {
+            respond(false, { error: "callId and digits required" });
+            return;
+          }
+          const rt = await ensureRuntime();
+          const result = await rt.manager.sendDtmf(callId, digits);
+          if (!result.success) {
+            respond(false, { error: result.error || "dtmf failed" });
+            return;
+          }
+          respond(true, { success: true });
+        } catch (err) {
+          sendError(respond, err);
+        }
+      },
+    );
+
+    api.registerGatewayMethod(
       "voicecall.end",
       async ({ params, respond }: GatewayRequestHandlerOptions) => {
         try {
@@ -391,6 +430,7 @@ export default definePluginEntry({
       description: "Make phone calls and have voice conversations via the voice-call plugin.",
       parameters: VoiceCallToolSchema,
       async execute(_toolCallId, params) {
+        const rawParams = asParamRecord(params);
         const json = (payload: unknown) => ({
           content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
           details: payload,
@@ -399,22 +439,22 @@ export default definePluginEntry({
         try {
           const rt = await ensureRuntime();
 
-          if (typeof params?.action === "string") {
-            switch (params.action) {
+          if (typeof rawParams.action === "string") {
+            switch (rawParams.action) {
               case "initiate_call": {
-                const message = normalizeOptionalString(params.message) ?? "";
+                const message = normalizeOptionalString(rawParams.message) ?? "";
                 if (!message) {
                   throw new Error("message required");
                 }
-                const to = normalizeOptionalString(params.to) ?? rt.config.toNumber;
+                const to = normalizeOptionalString(rawParams.to) ?? rt.config.toNumber;
                 if (!to) {
                   throw new Error("to required");
                 }
                 const result = await rt.manager.initiateCall(to, undefined, {
                   message,
                   mode:
-                    params.mode === "notify" || params.mode === "conversation"
-                      ? params.mode
+                    rawParams.mode === "notify" || rawParams.mode === "conversation"
+                      ? rawParams.mode
                       : undefined,
                 });
                 if (!result.success) {
@@ -423,8 +463,8 @@ export default definePluginEntry({
                 return json({ callId: result.callId, initiated: true });
               }
               case "continue_call": {
-                const callId = normalizeOptionalString(params.callId) ?? "";
-                const message = normalizeOptionalString(params.message) ?? "";
+                const callId = normalizeOptionalString(rawParams.callId) ?? "";
+                const message = normalizeOptionalString(rawParams.message) ?? "";
                 if (!callId || !message) {
                   throw new Error("callId and message required");
                 }
@@ -435,8 +475,8 @@ export default definePluginEntry({
                 return json({ success: true, transcript: result.transcript });
               }
               case "speak_to_user": {
-                const callId = normalizeOptionalString(params.callId) ?? "";
-                const message = normalizeOptionalString(params.message) ?? "";
+                const callId = normalizeOptionalString(rawParams.callId) ?? "";
+                const message = normalizeOptionalString(rawParams.message) ?? "";
                 if (!callId || !message) {
                   throw new Error("callId and message required");
                 }
@@ -446,8 +486,20 @@ export default definePluginEntry({
                 }
                 return json({ success: true });
               }
+              case "send_dtmf": {
+                const callId = normalizeOptionalString(rawParams.callId) ?? "";
+                const digits = normalizeOptionalString(rawParams.digits) ?? "";
+                if (!callId || !digits) {
+                  throw new Error("callId and digits required");
+                }
+                const result = await rt.manager.sendDtmf(callId, digits);
+                if (!result.success) {
+                  throw new Error(result.error || "dtmf failed");
+                }
+                return json({ success: true });
+              }
               case "end_call": {
-                const callId = normalizeOptionalString(params.callId) ?? "";
+                const callId = normalizeOptionalString(rawParams.callId) ?? "";
                 if (!callId) {
                   throw new Error("callId required");
                 }
@@ -458,7 +510,7 @@ export default definePluginEntry({
                 return json({ success: true });
               }
               case "get_status": {
-                const callId = normalizeOptionalString(params.callId) ?? "";
+                const callId = normalizeOptionalString(rawParams.callId) ?? "";
                 if (!callId) {
                   throw new Error("callId required");
                 }
@@ -469,9 +521,9 @@ export default definePluginEntry({
             }
           }
 
-          const mode = params?.mode ?? "call";
+          const mode = rawParams.mode ?? "call";
           if (mode === "status") {
-            const sid = normalizeOptionalString(params.sid) ?? "";
+            const sid = normalizeOptionalString(rawParams.sid) ?? "";
             if (!sid) {
               throw new Error("sid required for status");
             }
@@ -479,12 +531,12 @@ export default definePluginEntry({
             return json(call ? { found: true, call } : { found: false });
           }
 
-          const to = normalizeOptionalString(params.to) ?? rt.config.toNumber;
+          const to = normalizeOptionalString(rawParams.to) ?? rt.config.toNumber;
           if (!to) {
             throw new Error("to required for call");
           }
           const result = await rt.manager.initiateCall(to, undefined, {
-            message: normalizeOptionalString(params.message),
+            message: normalizeOptionalString(rawParams.message),
           });
           if (!result.success) {
             throw new Error(result.error || "initiate failed");
