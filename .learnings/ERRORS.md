@@ -17,7 +17,7 @@ Git commit failed because a stale `.git/index.lock` existed in the OpenClaw repo
 ### Error
 
 ```text
-fatal: Unable to create '/home/majk/.openclaw/workspace/projects/openclaw/.git/index.lock': File exists.
+fatal: Unable to create '/Users/mike/.openclaw/workspace/projects/openclaw/.git/index.lock': File exists.
 ```
 
 ### Context
