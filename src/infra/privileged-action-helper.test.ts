@@ -12,12 +12,17 @@ import {
 } from "./privileged-actions.js";
 import {
   consumePrivilegedActionRequestFile,
+  executePrivilegedHelperPlan,
+  loadPrivilegedHelperConfigFile,
   parsePrivilegedHelperCliArgv,
+  PRIVILEGED_HELPER_DEFAULT_CONFIG_PATH,
   PRIVILEGED_HELPER_INSTALL_PATH,
+  runPrivilegedHelperCliCommand,
   runPrivilegedHelperDoctor,
   validatePrivilegedHelperRequestRecord,
   type PrivilegedActionHelperRequestRecord,
   type PrivilegedHelperConfig,
+  type PrivilegedHelperDoctorCheck,
 } from "./privileged-action-helper.js";
 
 const tempDirs = createTrackedTempDirs();
@@ -100,6 +105,74 @@ async function writeRecordFile(record: PrivilegedActionHelperRequestRecord, mtim
   return file;
 }
 
+function fakeStat(params: {
+  file?: boolean;
+  directory?: boolean;
+  mode?: number;
+  uid?: number;
+  gid?: number;
+} = {}) {
+  return {
+    isSymbolicLink: () => false,
+    isFile: () => params.file ?? !params.directory,
+    isDirectory: () => params.directory ?? false,
+    mode: params.mode ?? 0o100755,
+    mtimeMs: nowMs,
+    uid: params.uid ?? 0,
+    gid: params.gid ?? 0,
+  };
+}
+
+function makeDoctorFs(overrides: {
+  sudoersContent?: string;
+  stats?: Record<string, ReturnType<typeof fakeStat>>;
+} = {}) {
+  const sudoersPath = "/etc/sudoers.d/openclaw-privileged-helper";
+  const configPath = "/Library/Application Support/OpenClaw/privileged-actions.json";
+  const stats = {
+    [PRIVILEGED_HELPER_INSTALL_PATH]: fakeStat({ mode: 0o100755 }),
+    [configPath]: fakeStat({ mode: 0o100644 }),
+    [requestStateDir]: fakeStat({ directory: true, mode: 0o40750 }),
+    ["/opt/homebrew/bin/brew"]: fakeStat({ mode: 0o100755 }),
+    [sudoersPath]: fakeStat({ mode: 0o100440 }),
+    ...overrides.stats,
+  };
+  return {
+    lstat: async (filePath: string) => {
+      const stat = stats[filePath];
+      if (!stat) {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }
+      return stat;
+    },
+    readFile: async (filePath: string) => {
+      if (filePath === sudoersPath) {
+        return (
+          overrides.sudoersContent ??
+          `mike ALL = (root) NOPASSWD: ${PRIVILEGED_HELPER_INSTALL_PATH}\n`
+        );
+      }
+      return "{}";
+    },
+    rename: fs.rename,
+    mkdir: fs.mkdir,
+    async access(filePath: string) {
+      if (!stats[filePath]) {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }
+    },
+  };
+}
+
+function doctorConfig(overrides: Partial<PrivilegedHelperConfig> = {}) {
+  return config({
+    configPath: "/Library/Application Support/OpenClaw/privileged-actions.json",
+    sudoersPath: "/etc/sudoers.d/openclaw-privileged-helper",
+    sudoersUser: "mike",
+    ...overrides,
+  });
+}
+
 describe("parsePrivilegedHelperCliArgv", () => {
   it("accepts only --request <id> and local doctor --json", () => {
     expect(parsePrivilegedHelperCliArgv(["--request", "req-1"])).toEqual({
@@ -144,6 +217,12 @@ describe("validatePrivilegedHelperRequestRecord", () => {
         executable: "/opt/homebrew/bin/brew",
         argv: ["install", "openssl@3"],
         shell: false,
+        env: {
+          HOME: "/var/empty",
+          LOGNAME: "root",
+          SHELL: "/bin/sh",
+          USER: "root",
+        },
       },
     });
   });
@@ -280,12 +359,31 @@ describe("consumePrivilegedActionRequestFile", () => {
     ).resolves.toMatchObject({ ok: false, code: "PRIVILEGED_HELPER_REQUEST_SYMLINK" });
   });
 
-  it("rejects group/world writable files and malformed JSON", async () => {
+  it("rejects group/world writable files, owner mismatches, and malformed JSON", async () => {
     const writable = await writeRecordFile(makeRecord({ id: "req-writable" }));
     await fs.chmod(writable, 0o660);
     await expect(
       consumePrivilegedActionRequestFile({ config: config(), requestId: "req-writable", nowMs }),
     ).resolves.toMatchObject({ ok: false, code: "PRIVILEGED_HELPER_REQUEST_WRITABLE" });
+
+    const ownerMismatchRecord = makeRecord({ id: "req-owner" });
+    const ownerMismatchPath = path.join(requestStateDir, "req-owner.json");
+    const ownerMismatchFs = {
+      lstat: async () => fakeStat({ mode: 0o100600, uid: 501, gid: 20 }),
+      readFile: async () => JSON.stringify(ownerMismatchRecord),
+      rename: fs.rename,
+      mkdir: fs.mkdir,
+      access: fs.access,
+    };
+    await expect(
+      consumePrivilegedActionRequestFile({
+        config: config({ expectedOwnerUid: 0, expectedGroupGid: 0 }),
+        requestId: "req-owner",
+        nowMs,
+        fs: ownerMismatchFs,
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "PRIVILEGED_HELPER_REQUEST_OWNER" });
+    expect(ownerMismatchPath).toContain("req-owner.json");
 
     const malformed = path.join(requestStateDir, "req-malformed.json");
     await fs.writeFile(malformed, "{", { mode: 0o600 });
@@ -295,24 +393,144 @@ describe("consumePrivilegedActionRequestFile", () => {
   });
 });
 
-describe("runPrivilegedHelperDoctor", () => {
-  it("returns structured local checks without requiring a Discord approval", async () => {
-    const fakeFs = {
-      lstat: fs.lstat,
-      readFile: fs.readFile,
-      rename: fs.rename,
-      mkdir: fs.mkdir,
-      async access() {
-        return undefined;
-      },
-    };
-
-    const report = await runPrivilegedHelperDoctor({
-      config: config({
-        configPath: "/Library/Application Support/OpenClaw/privileged-actions.json",
+describe("loadPrivilegedHelperConfigFile", () => {
+  it("loads trusted local helper config from JSON", async () => {
+    const configPath = path.join(requestStateDir, "privileged-actions.json");
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        helperPath: PRIVILEGED_HELPER_INSTALL_PATH,
+        helperVersion: "0.1.0",
+        helperHash: "sha256:helper",
+        brewPath: "/opt/homebrew/bin/brew",
+        requestStateDir,
+        consumedStateDir,
+        authorizedApprovers: ["195468996584275968"],
         sudoersPath: "/etc/sudoers.d/openclaw-privileged-helper",
       }),
-      fs: fakeFs,
+      { mode: 0o600 },
+    );
+
+    await expect(loadPrivilegedHelperConfigFile({ configPath })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        helperPath: PRIVILEGED_HELPER_INSTALL_PATH,
+        configPath,
+        brewPath: "/opt/homebrew/bin/brew",
+        authorizedApprovers: ["195468996584275968"],
+      },
+    });
+  });
+
+  it("rejects missing config and unsupported helper config values", async () => {
+    await expect(
+      loadPrivilegedHelperConfigFile({ configPath: PRIVILEGED_HELPER_DEFAULT_CONFIG_PATH }),
+    ).resolves.toMatchObject({ ok: false, code: "PRIVILEGED_HELPER_CONFIG_MALFORMED" });
+
+    const configPath = path.join(requestStateDir, "bad.json");
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        helperPath: "/tmp/helper",
+        brewPath: "brew",
+        requestStateDir,
+        authorizedApprovers: [],
+      }),
+    );
+    await expect(loadPrivilegedHelperConfigFile({ configPath })).resolves.toMatchObject({
+      ok: false,
+    });
+  });
+});
+
+describe("executePrivilegedHelperPlan", () => {
+  it("spawns the pinned brew executable without shell or PATH", async () => {
+    const plan = validatePrivilegedHelperRequestRecord({
+      config: config(),
+      record: makeRecord({ formula: "wget" }),
+      nowMs,
+      mtimeMs: nowMs,
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) {
+      throw new Error(plan.message);
+    }
+    const calls: unknown[] = [];
+    const result = await executePrivilegedHelperPlan({
+      plan: plan.value,
+      spawn: async (executable, argv, options) => {
+        calls.push({ executable, argv, options });
+        return { code: 0, signal: null, stdout: "", stderr: "" };
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(calls).toEqual([
+      {
+        executable: "/opt/homebrew/bin/brew",
+        argv: ["install", "wget"],
+        options: {
+          shell: false,
+          env: {
+            HOME: "/var/empty",
+            LOGNAME: "root",
+            SHELL: "/bin/sh",
+            USER: "root",
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("PATH");
+  });
+});
+
+describe("runPrivilegedHelperCliCommand", () => {
+  it("runs doctor locally and executes request records through the injected spawn boundary", async () => {
+    const doctor = await runPrivilegedHelperCliCommand({
+      argv: ["doctor", "--json"],
+      config: doctorConfig(),
+      fs: makeDoctorFs(),
+    });
+    expect(doctor).toMatchObject({ ok: true, kind: "doctor" });
+
+    await writeRecordFile(makeRecord({ id: "req-cli" }), nowMs);
+    const request = await runPrivilegedHelperCliCommand({
+      argv: ["--request", "req-cli"],
+      config: config(),
+      nowMs,
+      spawn: async () => ({ code: 0, signal: null, stdout: "", stderr: "" }),
+    });
+    expect(request).toMatchObject({ ok: true, kind: "request" });
+  });
+
+  it("reports brew failure without making the request reusable", async () => {
+    await writeRecordFile(makeRecord({ id: "req-brew-fail" }), nowMs);
+    const result = await runPrivilegedHelperCliCommand({
+      argv: ["--request", "req-brew-fail"],
+      config: config(),
+      nowMs,
+      spawn: async () => ({ code: 2, signal: null, stdout: "", stderr: "TOKEN=secret" }),
+    });
+    expect(result).toMatchObject({ ok: false, code: "PRIVILEGED_HELPER_BREW_FAILED" });
+    await expect(fs.stat(path.join(consumedStateDir, "req-brew-fail.json"))).resolves.toBeTruthy();
+  });
+});
+
+describe("runPrivilegedHelperDoctor", () => {
+  it("returns structured local checks without requiring a Discord approval", async () => {
+    const visudoCalls: Array<{ sudoersPath: string; expectedEntry: string }> = [];
+    const report = await runPrivilegedHelperDoctor({
+      config: doctorConfig(),
+      fs: makeDoctorFs(),
+      visudo: async (params): Promise<PrivilegedHelperDoctorCheck> => {
+        visudoCalls.push(params);
+        return {
+          name: "sudoers",
+          status: "pass",
+          path: params.sudoersPath,
+          message: "visudo -cf ok",
+        };
+      },
     });
 
     expect(report.ok).toBe(true);
@@ -324,6 +542,70 @@ describe("runPrivilegedHelperDoctor", () => {
       "brew",
       "sudoers",
     ]);
+    expect(report.checks.find((check) => check.name === "sudoers")).toMatchObject({
+      status: "pass",
+      message: "exact entry and validation ok",
+    });
+    expect(visudoCalls).toEqual([
+      {
+        sudoersPath: "/etc/sudoers.d/openclaw-privileged-helper",
+        expectedEntry: `mike ALL = (root) NOPASSWD: ${PRIVILEGED_HELPER_INSTALL_PATH}`,
+      },
+    ]);
     expect(JSON.stringify(report)).not.toContain("approval");
+  });
+
+  it("fails doctor on unsafe ownership, modes, sudoers content, and visudo validation", async () => {
+    const badHelper = await runPrivilegedHelperDoctor({
+      config: doctorConfig(),
+      fs: makeDoctorFs({
+        stats: {
+          [PRIVILEGED_HELPER_INSTALL_PATH]: fakeStat({ mode: 0o100775 }),
+        },
+      }),
+    });
+    expect(badHelper.checks.find((check) => check.name === "helper")).toMatchObject({
+      status: "fail",
+      message: "path must not be group/world writable",
+    });
+
+    const wrongOwner = await runPrivilegedHelperDoctor({
+      config: doctorConfig(),
+      fs: makeDoctorFs({
+        stats: {
+          [requestStateDir]: fakeStat({ directory: true, mode: 0o40750, uid: 501, gid: 20 }),
+        },
+      }),
+    });
+    expect(wrongOwner.checks.find((check) => check.name === "state")).toMatchObject({
+      status: "fail",
+      message: "owner 501:20 does not match expected 0:0",
+    });
+
+    const badSudoersContent = await runPrivilegedHelperDoctor({
+      config: doctorConfig(),
+      fs: makeDoctorFs({
+        sudoersContent: "mike ALL = (root) NOPASSWD: ALL\n",
+      }),
+    });
+    expect(badSudoersContent.checks.find((check) => check.name === "sudoers")).toMatchObject({
+      status: "fail",
+      message: "sudoers content does not match exact helper entry",
+    });
+
+    const badVisudo = await runPrivilegedHelperDoctor({
+      config: doctorConfig(),
+      fs: makeDoctorFs(),
+      visudo: async (params): Promise<PrivilegedHelperDoctorCheck> => ({
+        name: "sudoers",
+        status: "fail",
+        path: params.sudoersPath,
+        message: "visudo -cf failed",
+      }),
+    });
+    expect(badVisudo.checks.find((check) => check.name === "sudoers")).toMatchObject({
+      status: "fail",
+      message: "visudo -cf failed",
+    });
   });
 });
