@@ -23,6 +23,8 @@ import {
   SecretsConfigSchema,
 } from "./zod-schema.core.js";
 import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
+import { PluginInstallRecordShape } from "./zod-schema.installs.js";
+import { PrivilegedActionsSchema } from "./zod-schema.privileged-actions.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
 import { ProxyConfigSchema } from "./zod-schema.proxy.js";
 import { sensitive } from "./zod-schema.sensitive.js";
@@ -614,6 +616,7 @@ export const OpenClawSchema = z
     messages: MessagesSchema,
     commands: CommandsSchema,
     approvals: ApprovalsSchema,
+    privilegedActions: PrivilegedActionsSchema,
     session: SessionSchema,
     cron: z
       .object({
