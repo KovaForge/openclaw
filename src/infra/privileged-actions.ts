@@ -33,6 +33,8 @@ export type PrivilegedActionHelperIdentity = {
   path: string;
   version?: string | null;
   hash?: string | null;
+  /** Optional Phase 2B helper pin. Included in binding when present. */
+  brewPath?: PrivilegedActionBrewPath | null;
 };
 
 export type PrivilegedActionRequest = {
