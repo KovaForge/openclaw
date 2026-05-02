@@ -9,15 +9,15 @@ title: "Privileged actions"
 
 Privileged actions are the Gatekeeper approval path for narrow local helper verbs. They are separate from normal `exec` and from `~/.openclaw/exec-approvals.json`.
 
-The MVP supports design/types/tests for one mutating verb:
+The MVP supports one mutating verb:
 
 - `homebrew.install(formula)`
 
-It also documents the planned local diagnostic command:
+It also includes the planned local diagnostic command:
 
 - `privileged doctor`
 
-No helper, sudoers entry, or launchd service is installed by this phase.
+Phase 2B pass 1 adds repo-native TypeScript helper source and unit tests only. It does not install the helper, write sudoers, modify `/usr/local`, `/Library`, or `/var/run`, or run anything as root.
 
 ## Security model
 
@@ -72,6 +72,29 @@ The config schema hard-codes `passwordPrompt: false` and only accepts `approval.
 - `/opt/homebrew/bin/brew`
 
 The Phase 2B helper must use this configured/default pinned path directly. It must not resolve `brew` through `PATH` and must reject arbitrary executable paths.
+
+## Helper implementation
+
+The helper source lives at `src/infra/privileged-action-helper.ts`. The implementation language is TypeScript because OpenClaw is already TypeScript, the helper can reuse the same canonical action normalization and binding code as the runtime, and the security boundary is testable without adding a second toolchain.
+
+The intended installed helper path remains exact and sudoers-bound:
+
+```text
+/usr/local/libexec/openclaw-privileged-helper
+```
+
+Phase 2B pass 1 is source/docs/tests only. Packaging and installation must be reviewed separately before any file is copied to that path.
+
+The helper CLI accepts only these shapes:
+
+```text
+openclaw-privileged-helper --request <request-id>
+openclaw-privileged-helper doctor --json
+```
+
+Request argv contains only the request ID. The helper reads the verb and formula from the bound request record, reconstructs the binding hash locally, verifies the authorized approver against trusted config, and consumes the request atomically before returning an execution plan.
+
+The helper must execute Homebrew directly through the pinned `helper.brewPath` value. It must not invoke a shell, use `/usr/bin/env`, search `PATH`, or accept an executable path from the request argv.
 
 ## Formula normalization
 
@@ -154,11 +177,35 @@ Do not render `Allow Always` for privileged actions.
 
 Unauthorized Discord clicks should be ephemeral and should not change approval state.
 
+## Install and rollback runbook
+
+The sudoers MVP install remains a manual, reviewed Phase 2B operation. Do not perform these steps from normal source tests.
+
+Install plan:
+
+- build/package the reviewed helper artifact
+- copy it to `/usr/local/libexec/openclaw-privileged-helper`
+- set root ownership and non-writable permissions on the helper artifact
+- write `/Library/Application Support/OpenClaw/privileged-actions.json` with the pinned helper and brew paths
+- create the request state directory with safe ownership and permissions
+- add a sudoers entry for the exact helper path and exact OpenClaw invoking user only
+- validate with `visudo -cf` before enabling
+- run `openclaw-privileged-helper doctor --json`
+
+Rollback plan:
+
+- remove the sudoers entry and re-run `visudo -cf`
+- remove the helper artifact from `/usr/local/libexec/openclaw-privileged-helper`
+- remove or archive the OpenClaw privileged config and state directories
+- confirm `doctor --json` reports the helper/sudoers paths as absent
+
+Phase 2B pass 1 does not execute any install or rollback step.
+
 ## privileged doctor
 
-`privileged doctor` is the planned local Phase 2B diagnostic. It is design-only in Phase 2A, must remain local-only, and must not be exposed as a Discord-approved privileged action. It does not require Discord approval and does not perform network requests.
+`privileged doctor` is the local Phase 2B diagnostic. It must remain local-only and must not be exposed as a Discord-approved privileged action. It does not require Discord approval and does not perform network requests.
 
-The helper MVP should report structured checks for:
+The helper MVP reports structured JSON checks for:
 
 - helper binary exists and has expected ownership/permissions
 - helper hash/version matches config
@@ -167,7 +214,7 @@ The helper MVP should report structured checks for:
 - sudoers entry exists for the exact helper path
 - configured Homebrew path exists and is executable
 
-Doctor is documentation/design-only in Phase 2A.
+Doctor is implemented as source/tests in Phase 2B pass 1, but the helper is not installed by default yet.
 
 ## Manual Phase 2B acceptance gates
 
