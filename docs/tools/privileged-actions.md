@@ -75,7 +75,7 @@ The Phase 2B helper must use this configured/default pinned path directly. It mu
 
 ## Helper implementation
 
-The helper source lives at `src/infra/privileged-action-helper.ts`. The implementation language is TypeScript because OpenClaw is already TypeScript, the helper can reuse the same canonical action normalization and binding code as the runtime, and the security boundary is testable without adding a second toolchain.
+The helper core lives at `src/infra/privileged-action-helper.ts`; the CLI entrypoint lives at `src/infra/privileged-action-helper-cli.ts` and is registered for build output as `privileged/openclaw-privileged-helper`. The implementation language is TypeScript because OpenClaw is already TypeScript, the helper can reuse the same canonical action normalization and binding code as the runtime, and the security boundary is testable without adding a second toolchain.
 
 The intended installed helper path remains exact and sudoers-bound:
 
@@ -83,7 +83,7 @@ The intended installed helper path remains exact and sudoers-bound:
 /usr/local/libexec/openclaw-privileged-helper
 ```
 
-Phase 2B pass 1 is source/docs/tests only. Packaging and installation must be reviewed separately before any file is copied to that path.
+Phase 2B source passes are source/docs/tests only. Packaging and installation must be reviewed separately before any file is copied to that path.
 
 The helper CLI accepts only these shapes:
 
@@ -92,9 +92,9 @@ openclaw-privileged-helper --request <request-id>
 openclaw-privileged-helper doctor --json
 ```
 
-Request argv contains only the request ID. The helper reads the verb and formula from the bound request record, reconstructs the binding hash locally, verifies the authorized approver against trusted config, and consumes the request atomically before returning an execution plan.
+Request argv contains only the request ID. The helper reads trusted local config from `/Library/Application Support/OpenClaw/privileged-actions.json`, reads the verb and formula from the bound request record, reconstructs the binding hash locally, verifies the authorized approver against trusted config, and consumes the request atomically before dispatch.
 
-The helper must execute Homebrew directly through the pinned `helper.brewPath` value. It must not invoke a shell, use `/usr/bin/env`, search `PATH`, or accept an executable path from the request argv.
+The helper executes Homebrew directly through the pinned `helper.brewPath` value with a stripped minimal environment and `shell: false`. It must not invoke a shell, use `/usr/bin/env`, search `PATH`, or accept an executable path from the request argv.
 
 ## Formula normalization
 
@@ -186,10 +186,10 @@ Install plan:
 - build/package the reviewed helper artifact
 - copy it to `/usr/local/libexec/openclaw-privileged-helper`
 - set root ownership and non-writable permissions on the helper artifact
-- write `/Library/Application Support/OpenClaw/privileged-actions.json` with the pinned helper and brew paths
-- create the request state directory with safe ownership and permissions
+- write `/Library/Application Support/OpenClaw/privileged-actions.json` with the pinned helper path, brew path, request state directory, optional consumed state directory, authorized approvers, sudoers user, and expected ownership metadata when enabled
+- create the request state directory and consumed state directory with safe ownership and permissions; if `consumedStateDir` is omitted, the helper defaults it to `<requestStateDir>/consumed`
 - add a sudoers entry for the exact helper path and exact OpenClaw invoking user only
-- validate with `visudo -cf` before enabling
+- validate the drop-in with `visudo -cf` before enabling
 - run `openclaw-privileged-helper doctor --json`
 
 Rollback plan:
@@ -207,14 +207,14 @@ Phase 2B pass 1 does not execute any install or rollback step.
 
 The helper MVP reports structured JSON checks for:
 
-- helper binary exists and has expected ownership/permissions
+- helper binary exists at the expected path, is executable, is not group/world-writable, and is root:wheel where ownership metadata is available
 - helper hash/version matches config
-- config exists and is root-owned
-- request directory exists and has safe permissions
-- sudoers entry exists for the exact helper path
+- config exists, is not group/world-writable, and is root:wheel where ownership metadata is available
+- request directory exists, is root:wheel where ownership metadata is available, and is mode `0750` or stricter
+- sudoers drop-in exists, is not group/world-writable, is mode `0440` or stricter, contains exactly `<openclaw-user> ALL = (root) NOPASSWD: /usr/local/libexec/openclaw-privileged-helper`, and can be modeled through an injectable `visudo -cf` validation check in tests
 - configured Homebrew path exists and is executable
 
-Doctor is implemented as source/tests in Phase 2B pass 1, but the helper is not installed by default yet.
+Doctor is implemented as source/tests in Phase 2B, but the helper is not installed by default yet. Unit tests inject filesystem metadata and visudo results; they do not run live sudo or validate host sudoers files.
 
 ## Manual Phase 2B acceptance gates
 
