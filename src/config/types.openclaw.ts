@@ -29,6 +29,7 @@ import type {
 import type { ModelsConfig } from "./types.models.js";
 import type { NodeHostConfig } from "./types.node-host.js";
 import type { PluginsConfig } from "./types.plugins.js";
+import type { PrivilegedActionsConfig } from "./types.privileged-actions.js";
 import type { SecretsConfig } from "./types.secrets.js";
 import type { SkillsConfig } from "./types.skills.js";
 import type { ToolsConfig } from "./types.tools.js";
@@ -122,6 +123,7 @@ export type OpenClawConfig = {
   messages?: MessagesConfig;
   commands?: CommandsConfig;
   approvals?: ApprovalsConfig;
+  privilegedActions?: PrivilegedActionsConfig;
   session?: SessionConfig;
   web?: WebConfig;
   channels?: ChannelsConfig;

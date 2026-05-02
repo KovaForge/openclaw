@@ -54,6 +54,7 @@ These tools ship with OpenClaw and are available without installing any plugins:
 | Tool                                       | What it does                                                          | Page                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `exec` / `process`                         | Run shell commands, manage background processes                       | [Exec](/tools/exec), [Exec Approvals](/tools/exec-approvals) |
+| `privilegedActions`                        | Configure Gatekeeper privileged-action approvals                      | [Privileged Actions](/tools/privileged-actions)              |
 | `code_execution`                           | Run sandboxed remote Python analysis                                  | [Code Execution](/tools/code-execution)                      |
 | `browser`                                  | Control a Chromium browser (navigate, click, screenshot)              | [Browser](/tools/browser)                                    |
 | `web_search` / `x_search` / `web_fetch`    | Search the web, search X posts, fetch page content                    | [Web](/tools/web), [Web Fetch](/tools/web-fetch)             |
