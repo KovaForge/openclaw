@@ -24,6 +24,27 @@ export function collectExplicitToolAllowlistSources(
   });
 }
 
+export function buildPreconstructionToolAllowlist(
+  sources: ExplicitToolAllowlistSource[],
+): string[] | undefined {
+  if (sources.length === 0) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const allowlist: string[] = [];
+  for (const source of sources) {
+    for (const entry of source.entries) {
+      const normalized = normalizeToolName(entry);
+      if (!normalized || seen.has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      allowlist.push(entry.trim());
+    }
+  }
+  return allowlist.length > 0 ? allowlist : undefined;
+}
+
 export function buildEmptyExplicitToolAllowlistError(params: {
   sources: ExplicitToolAllowlistSource[];
   callableToolNames: string[];

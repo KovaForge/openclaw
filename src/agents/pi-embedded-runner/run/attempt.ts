@@ -157,6 +157,7 @@ import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveAgentTimeoutMs } from "../../timeout.js";
 import {
+  buildPreconstructionToolAllowlist,
   buildEmptyExplicitToolAllowlistError,
   collectExplicitToolAllowlistSources,
 } from "../../tool-allowlist-guard.js";
@@ -787,11 +788,33 @@ export async function runEmbeddedAttempt(
         ...(err ? { errorCategory: diagnosticErrorCategory(err) } : {}),
       });
     };
+    const explicitToolAllowlistSources = collectAttemptExplicitToolAllowlistSources({
+      config: params.config,
+      sessionKey: params.sessionKey,
+      sandboxSessionKey,
+      agentId: sessionAgentId,
+      modelProvider: params.provider,
+      modelId: params.modelId,
+      messageProvider: resolveAttemptToolPolicyMessageProvider(params),
+      agentAccountId: params.agentAccountId,
+      groupId: params.groupId,
+      groupChannel: params.groupChannel,
+      groupSpace: params.groupSpace,
+      spawnedBy: params.spawnedBy,
+      senderId: params.senderId,
+      senderName: params.senderName,
+      senderUsername: params.senderUsername,
+      senderE164: params.senderE164,
+      sandboxToolPolicy: sandbox?.tools,
+      toolsAllow: params.toolsAllow,
+    });
+    const preconstructionToolsAllow =
+      params.toolsAllow ?? buildPreconstructionToolAllowlist(explicitToolAllowlistSources);
     const corePluginToolStages = createEmbeddedRunStageTracker();
     const toolConstructionPlan = resolveEmbeddedAttemptToolConstructionPlan({
       disableTools: params.disableTools,
       isRawModelRun,
-      toolsAllow: params.toolsAllow,
+      toolsAllow: preconstructionToolsAllow,
     });
     const toolsRaw = !toolConstructionPlan.constructTools
       ? []
@@ -853,6 +876,7 @@ export async function runEmbeddedAttempt(
             currentMessageId: params.currentMessageId,
             includeCoreTools: toolConstructionPlan.includeCoreTools,
             toolConstructionPlan: toolConstructionPlan.codingToolConstructionPlan,
+            runtimeToolAllowlist: toolConstructionPlan.runtimeToolAllowlist,
             replyToMode: params.replyToMode,
             hasRepliedRef: params.hasRepliedRef,
             modelHasVision: params.model.input?.includes("image") ?? false,
@@ -874,9 +898,13 @@ export async function runEmbeddedAttempt(
             },
           });
           corePluginToolStages.mark("attempt:create-openclaw-coding-tools");
-          const filteredTools = applyEmbeddedAttemptToolsAllow(allTools, params.toolsAllow, {
-            toolMeta: (tool) => getPluginToolMeta(tool),
-          });
+          const filteredTools = applyEmbeddedAttemptToolsAllow(
+            allTools,
+            toolConstructionPlan.runtimeToolAllowlist,
+            {
+              toolMeta: (tool) => getPluginToolMeta(tool),
+            },
+          );
           corePluginToolStages.mark("attempt:tools-allow");
           return filteredTools;
         })();
@@ -1023,7 +1051,7 @@ export async function runEmbeddedAttempt(
     const bundleMcpEnabled = shouldCreateBundleMcpRuntimeForAttempt({
       toolsEnabled,
       disableTools: params.disableTools || isRawModelRun,
-      toolsAllow: params.toolsAllow,
+      toolsAllow: preconstructionToolsAllow,
     });
     const bundleMcpSessionRuntime = bundleMcpEnabled
       ? await getOrCreateSessionMcpRuntime({
@@ -1045,7 +1073,7 @@ export async function runEmbeddedAttempt(
     const bundleLspEnabled = shouldCreateBundleLspRuntimeForAttempt({
       toolsEnabled,
       disableTools: params.disableTools || isRawModelRun,
-      toolsAllow: params.toolsAllow,
+      toolsAllow: preconstructionToolsAllow,
     });
     const bundleLspRuntime = bundleLspEnabled
       ? await createBundleLspToolRuntime({
@@ -1085,26 +1113,6 @@ export async function runEmbeddedAttempt(
     const allowedToolNames = collectAllowedToolNames({
       tools: effectiveTools,
       clientTools,
-    });
-    const explicitToolAllowlistSources = collectAttemptExplicitToolAllowlistSources({
-      config: params.config,
-      sessionKey: params.sessionKey,
-      sandboxSessionKey,
-      agentId: sessionAgentId,
-      modelProvider: params.provider,
-      modelId: params.modelId,
-      messageProvider: resolveAttemptToolPolicyMessageProvider(params),
-      agentAccountId: params.agentAccountId,
-      groupId: params.groupId,
-      groupChannel: params.groupChannel,
-      groupSpace: params.groupSpace,
-      spawnedBy: params.spawnedBy,
-      senderId: params.senderId,
-      senderName: params.senderName,
-      senderUsername: params.senderUsername,
-      senderE164: params.senderE164,
-      sandboxToolPolicy: sandbox?.tools,
-      toolsAllow: params.toolsAllow,
     });
     const emptyExplicitToolAllowlistError = buildEmptyExplicitToolAllowlistError({
       sources: explicitToolAllowlistSources,

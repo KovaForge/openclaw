@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPreconstructionToolAllowlist,
   buildEmptyExplicitToolAllowlistError,
   collectExplicitToolAllowlistSources,
 } from "./tool-allowlist-guard.js";
@@ -92,5 +93,22 @@ describe("tool allowlist guard", () => {
         enforceWhenToolsDisabled: true,
       },
     ]);
+  });
+
+  it("derives a deduplicated preconstruction allowlist from explicit sources", () => {
+    const sources = collectExplicitToolAllowlistSources([
+      { label: "group tools.allow", allow: [" session_status ", "READ"] },
+      { label: "runtime toolsAllow", allow: ["read", "bundle-mcp"] },
+    ]);
+
+    expect(buildPreconstructionToolAllowlist(sources)).toEqual([
+      "session_status",
+      "READ",
+      "bundle-mcp",
+    ]);
+  });
+
+  it("does not constrain preconstruction when no explicit allowlists exist", () => {
+    expect(buildPreconstructionToolAllowlist([])).toBeUndefined();
   });
 });
