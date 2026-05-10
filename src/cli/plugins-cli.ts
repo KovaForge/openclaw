@@ -91,6 +91,12 @@ function isErroredConfigSelectedShadowDiagnostic(params: {
   );
 }
 
+function pluginIdFromPeerIssuePackageName(packageName: string): string {
+  return packageName.startsWith("@openclaw/")
+    ? packageName.slice("@openclaw/".length)
+    : packageName;
+}
+
 export function registerPluginsCli(program: Command) {
   const plugins = program
     .command("plugins")
@@ -366,6 +372,9 @@ export function registerPluginsCli(program: Command) {
         buildPluginDiagnosticsReport,
         formatPluginCompatibilityNotice,
       } = await import("../plugins/status.js");
+      const { resolveDefaultPluginNpmDir } = await import("../plugins/install-paths.js");
+      const { auditOpenClawPeerDependenciesInManagedNpmRoot } =
+        await import("../plugins/plugin-peer-link.js");
       const report = buildPluginDiagnosticsReport({ effectiveOnly: true });
       const errors = report.plugins.filter((p) => p.status === "error");
       const diags = report.diagnostics.filter((d) => d.level === "error");
@@ -373,12 +382,17 @@ export function registerPluginsCli(program: Command) {
         isErroredConfigSelectedShadowDiagnostic({ entry, plugins: report.plugins }),
       );
       const compatibility = buildPluginCompatibilityNotices({ report });
+      const peerLinkAudit = await auditOpenClawPeerDependenciesInManagedNpmRoot({
+        npmRoot: resolveDefaultPluginNpmDir(process.env),
+      });
+      const peerLinkIssues = peerLinkAudit.issues;
 
       if (
         errors.length === 0 &&
         diags.length === 0 &&
         shadowed.length === 0 &&
-        compatibility.length === 0
+        compatibility.length === 0 &&
+        peerLinkIssues.length === 0
       ) {
         defaultRuntime.log("No plugin issues detected.");
         return;
@@ -435,6 +449,19 @@ export function registerPluginsCli(program: Command) {
         for (const notice of compatibility) {
           const marker = notice.severity === "warn" ? theme.warn("warn") : theme.muted("info");
           lines.push(`- ${formatPluginCompatibilityNotice(notice)} [${marker}]`);
+        }
+      }
+      if (peerLinkIssues.length > 0) {
+        if (lines.length > 0) {
+          lines.push("");
+        }
+        lines.push(theme.warn("OpenClaw peer links:"));
+        for (const issue of peerLinkIssues) {
+          const pluginId = pluginIdFromPeerIssuePackageName(issue.packageName);
+          lines.push(
+            `- ${issue.packageName}: ${issue.reason} peerDependency "openclaw" at ${shortenHomeInString(issue.linkPath)}`,
+          );
+          lines.push(`  repair: openclaw plugins update ${pluginId}`);
         }
       }
       const docs = formatDocsLink("/plugin", "docs.openclaw.ai/plugin");

@@ -12,6 +12,35 @@ type RelinkManagedNpmRootResult = {
   attempted: number;
 };
 
+export type OpenClawPeerDependencyLinkIssueReason =
+  | "host-root-unresolved"
+  | "missing"
+  | "unreadable"
+  | "wrong-target";
+
+export type OpenClawPeerDependencyLinkIssue = {
+  packageDir: string;
+  packageName: string;
+  peerName: "openclaw";
+  linkPath: string;
+  reason: OpenClawPeerDependencyLinkIssueReason;
+  expectedTarget?: string;
+  actualTarget?: string;
+  error?: string;
+};
+
+export type OpenClawPeerDependencyLinkAudit = {
+  checked: number;
+  issues: OpenClawPeerDependencyLinkIssue[];
+};
+
+export type RepairOpenClawPeerDependencyLinksResult = {
+  checked: number;
+  attempted: number;
+  issuesBefore: OpenClawPeerDependencyLinkIssue[];
+  issuesAfter: OpenClawPeerDependencyLinkIssue[];
+};
+
 function readStringRecord(value: unknown): Record<string, string> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return {};
@@ -77,6 +106,71 @@ async function listManagedNpmRootPackageDirs(npmRoot: string): Promise<string[]>
   return packageDirs.toSorted((a, b) => a.localeCompare(b));
 }
 
+function packageNameFromDir(packageDir: string): string {
+  const name = path.basename(packageDir);
+  const scope = path.basename(path.dirname(packageDir));
+  return scope.startsWith("@") ? `${scope}/${name}` : name;
+}
+
+function resolveHostRoot(): string | null {
+  return resolveOpenClawPackageRootSync({
+    argv1: process.argv[1],
+    moduleUrl: import.meta.url,
+    cwd: process.cwd(),
+  });
+}
+
+async function realpathOrIssue(params: {
+  packageDir: string;
+  linkPath: string;
+  hostRoot: string;
+}): Promise<OpenClawPeerDependencyLinkIssue | null> {
+  let expectedTarget: string;
+  try {
+    expectedTarget = await fs.realpath(params.hostRoot);
+  } catch (err) {
+    return {
+      packageDir: params.packageDir,
+      packageName: packageNameFromDir(params.packageDir),
+      peerName: "openclaw",
+      linkPath: params.linkPath,
+      reason: "host-root-unresolved",
+      expectedTarget: params.hostRoot,
+      error: String(err),
+    };
+  }
+
+  let actualTarget: string;
+  try {
+    actualTarget = await fs.realpath(params.linkPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return {
+      packageDir: params.packageDir,
+      packageName: packageNameFromDir(params.packageDir),
+      peerName: "openclaw",
+      linkPath: params.linkPath,
+      reason: code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unreadable",
+      expectedTarget,
+      error: String(err),
+    };
+  }
+
+  if (actualTarget !== expectedTarget) {
+    return {
+      packageDir: params.packageDir,
+      packageName: packageNameFromDir(params.packageDir),
+      peerName: "openclaw",
+      linkPath: params.linkPath,
+      reason: "wrong-target",
+      expectedTarget,
+      actualTarget,
+    };
+  }
+
+  return null;
+}
+
 /**
  * Symlink the host openclaw package for plugins that declare it as a peer.
  * Plugin package managers still own third-party dependencies; this only wires
@@ -92,11 +186,7 @@ export async function linkOpenClawPeerDependencies(params: {
     return;
   }
 
-  const hostRoot = resolveOpenClawPackageRootSync({
-    argv1: process.argv[1],
-    moduleUrl: import.meta.url,
-    cwd: process.cwd(),
-  });
+  const hostRoot = resolveHostRoot();
   if (!hostRoot) {
     params.logger.warn?.(
       "Could not locate openclaw package root to symlink peerDependencies; plugin may fail to resolve openclaw at runtime.",
@@ -140,4 +230,71 @@ export async function relinkOpenClawPeerDependenciesInManagedNpmRoot(params: {
     attempted += 1;
   }
   return { checked, attempted };
+}
+
+export async function auditOpenClawPeerDependenciesInManagedNpmRoot(params: {
+  npmRoot: string;
+}): Promise<OpenClawPeerDependencyLinkAudit> {
+  let checked = 0;
+  const issues: OpenClawPeerDependencyLinkIssue[] = [];
+  const hostRoot = resolveHostRoot();
+
+  for (const packageDir of await listManagedNpmRootPackageDirs(params.npmRoot)) {
+    const peerDependencies = await readPackagePeerDependencies(packageDir);
+    if (!Object.hasOwn(peerDependencies, "openclaw")) {
+      continue;
+    }
+    checked += 1;
+    const linkPath = path.join(packageDir, "node_modules", "openclaw");
+    if (!hostRoot) {
+      issues.push({
+        packageDir,
+        packageName: packageNameFromDir(packageDir),
+        peerName: "openclaw",
+        linkPath,
+        reason: "host-root-unresolved",
+      });
+      continue;
+    }
+    const issue = await realpathOrIssue({ packageDir, linkPath, hostRoot });
+    if (issue) {
+      issues.push(issue);
+    }
+  }
+
+  return { checked, issues };
+}
+
+export async function repairOpenClawPeerDependencyLinkIssuesInManagedNpmRoot(params: {
+  npmRoot: string;
+  logger: PluginPeerLinkLogger;
+}): Promise<RepairOpenClawPeerDependencyLinksResult> {
+  const before = await auditOpenClawPeerDependenciesInManagedNpmRoot({
+    npmRoot: params.npmRoot,
+  });
+  let attempted = 0;
+  const packageDirs = new Set(before.issues.map((issue) => issue.packageDir));
+
+  for (const packageDir of packageDirs) {
+    const peerDependencies = await readPackagePeerDependencies(packageDir);
+    if (!Object.hasOwn(peerDependencies, "openclaw")) {
+      continue;
+    }
+    await linkOpenClawPeerDependencies({
+      installedDir: packageDir,
+      peerDependencies,
+      logger: params.logger,
+    });
+    attempted += 1;
+  }
+
+  const after = await auditOpenClawPeerDependenciesInManagedNpmRoot({
+    npmRoot: params.npmRoot,
+  });
+  return {
+    checked: after.checked,
+    attempted,
+    issuesBefore: before.issues,
+    issuesAfter: after.issues,
+  };
 }

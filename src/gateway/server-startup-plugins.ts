@@ -2,8 +2,10 @@ import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent
 import { initSubagentRegistry } from "../agents/subagent-registry.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resolveDefaultPluginNpmDir } from "../plugins/install-paths.js";
 import { loadPluginLookUpTable } from "../plugins/plugin-lookup-table.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import { repairOpenClawPeerDependencyLinkIssuesInManagedNpmRoot } from "../plugins/plugin-peer-link.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/runtime.js";
 import { mergeActivationSectionsIntoRuntimeConfig } from "./plugin-activation-runtime-config.js";
@@ -31,6 +33,32 @@ export function resolveGatewayStartupMaintenanceConfig(params: {
         channels: params.startupRuntimeConfig.channels,
       }
     : params.cfgAtStart;
+}
+
+export async function repairGatewayStartupOpenClawPeerLinks(params: {
+  env: NodeJS.ProcessEnv;
+  log: Pick<GatewayPluginBootstrapLog, "info" | "warn">;
+}): Promise<void> {
+  try {
+    const result = await repairOpenClawPeerDependencyLinkIssuesInManagedNpmRoot({
+      npmRoot: resolveDefaultPluginNpmDir(params.env),
+      logger: params.log,
+    });
+    if (result.issuesBefore.length === 0) {
+      return;
+    }
+    if (result.issuesAfter.length === 0) {
+      params.log.info(
+        `Repaired OpenClaw peer links for ${result.attempted} npm plugin package(s) before loading plugins.`,
+      );
+      return;
+    }
+    params.log.warn(
+      `OpenClaw peer link repair left ${result.issuesAfter.length} unresolved npm plugin issue(s); plugin loading may fail.`,
+    );
+  } catch (err) {
+    params.log.warn(`OpenClaw peer link startup repair failed: ${String(err)}`);
+  }
 }
 
 export async function prepareGatewayPluginBootstrap(params: {
@@ -88,6 +116,12 @@ export async function prepareGatewayPluginBootstrap(params: {
         }).config,
       });
   const pluginsGloballyDisabled = gatewayPluginConfig.plugins?.enabled === false;
+  if (!params.minimalTestGateway && !pluginsGloballyDisabled) {
+    await repairGatewayStartupOpenClawPeerLinks({
+      env: process.env,
+      log: params.log,
+    });
+  }
   const defaultAgentId = resolveDefaultAgentId(gatewayPluginConfig);
   const defaultWorkspaceDir = resolveAgentWorkspaceDir(gatewayPluginConfig, defaultAgentId);
   const pluginLookUpTable =
